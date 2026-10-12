@@ -1,0 +1,50 @@
+{
+  "name": "dsh-markdown-strikethrough-guard",
+  "description": "DSH client plugin: protects single-tilde ranges (e.g. 6~8, 160~180) from mis-triggering GFM strikethrough in chat views while preserving double-tilde (~~) strikethrough, code blocks, and math.",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "markdown",
+    "strikethrough",
+    "tilde",
+    "ui"
+  ],
+  "author": "imcaibaicai",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imcaibaicai/dsh-markdown-strikethrough-guard.git"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "install.ps1",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ]
+}
