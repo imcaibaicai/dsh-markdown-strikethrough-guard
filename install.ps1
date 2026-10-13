@@ -1,8 +1,20 @@
-# install.ps1 -- install or uninstall dsh-markdown-strikethrough-guard plugin.
+# install.ps1 -- install / uninstall dsh-markdown-strikethrough-guard into ALL DSH profiles.
+#
+# Why "all profiles": the running DeepSeek Harness.exe host loads exactly ONE
+# profile directory (its command line names it, e.g. ...\.dsh\profiles\desktop).
+# A plugin installed only into profiles\web is never loaded -- that was exactly
+# the v0.1.0 bug this rewrite fixes. We therefore junction the package into every
+# profile node_modules dir and append one loader row to every profile
+# cordis.patch.yml.
 #
 # Usage:
-#   .\install.ps1            # install and configure
-#   .\install.ps1 -Uninstall  # cleanly revert junction and cordis.patch.yml row
+#   .\install.ps1             # install into every profile found
+#   .\install.ps1 -Uninstall  # remove junctions + loader rows again
+#
+# NOTE: intentionally ASCII-only (Windows PowerShell 5.1 reads BOM-less UTF-8 as
+# the ANSI codepage; non-ASCII literals then corrupt the config file).
+# NOTE: removing a junction MUST use [System.IO.Directory]::Delete($p,$false);
+# Remove-Item -Recurse would follow the link and delete the real package.
 
 param(
     [switch]$Uninstall
@@ -12,101 +24,116 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceDir = $scriptDir
+$pkgName   = 'dsh-markdown-strikethrough-guard'
 
 if (-not (Test-Path (Join-Path $sourceDir 'package.json'))) {
     throw "plugin source package.json not found in: $sourceDir"
 }
 
-$dshHome = 'D:\DeepSeekHarness\.dsh'
-if ($env:DSH_HOME -and (Test-Path $env:DSH_HOME)) {
+# ---------- resolve DSH home ----------
+$dshHome = $null
+if ($env:DSH_HOME -and (Test-Path (Join-Path $env:DSH_HOME 'profiles'))) {
     $dshHome = $env:DSH_HOME
+} elseif (Test-Path 'D:\DeepSeekHarness\.dsh\profiles') {
+    $dshHome = 'D:\DeepSeekHarness\.dsh'
+} elseif ($env:USERPROFILE -and (Test-Path (Join-Path $env:USERPROFILE '.dsh\profiles'))) {
+    $dshHome = Join-Path $env:USERPROFILE '.dsh'
 }
+if (-not $dshHome) { throw "cannot locate DSH home (no profiles dir found)" }
 
-$profilesNodeModules = Join-Path $dshHome 'profiles\node_modules'
-$webNodeModules      = Join-Path $dshHome 'profiles\web\node_modules'
-$patchFile           = Join-Path $dshHome 'profiles\web\cordis.patch.yml'
+$profilesDir = Join-Path $dshHome 'profiles'
+Write-Host "DSH home : $dshHome" -ForegroundColor Cyan
 
-$targetProfiles = Join-Path $profilesNodeModules 'dsh-markdown-strikethrough-guard'
-$targetWeb      = Join-Path $webNodeModules 'dsh-markdown-strikethrough-guard'
-
-$rowComment = "# Markdown strikethrough guard: escape lone tildes in ranges"
-$rowEntry = @(
-    "- insert:",
-    "    - id: markdown-strikethrough-guard",
-    "      name: 'dsh-markdown-strikethrough-guard'"
-)
-
-# ----------------- UNINSTALL -----------------
-if ($Uninstall) {
-    Write-Host "[Uninstall] Removing junctions..." -ForegroundColor Cyan
-
-    if (Test-Path $targetProfiles) {
-        Write-Host "  Removing junction: $targetProfiles"
-        [System.IO.Directory]::Delete($targetProfiles, $false)
-    }
-    if (Test-Path $targetWeb) {
-        Write-Host "  Removing junction: $targetWeb"
-        [System.IO.Directory]::Delete($targetWeb, $false)
-    }
-
-    if (Test-Path $patchFile) {
-        Write-Host "  Reverting cordis.patch.yml..."
-        $content = Get-Content -Path $patchFile -Raw -Encoding UTF8
-        # Remove inserted block
-        $pattern = "(?ms)\r?\n# Markdown strikethrough guard[^\r\n]*\r?\n- insert:\r?\n\s+- id: markdown-strikethrough-guard\r?\n\s+name: ['`"]dsh-markdown-strikethrough-guard['`"]"
-        $newContent = [System.Text.RegularExpressions.Regex]::Replace($content, $pattern, "")
-        if ($newContent -ne $content) {
-            Set-Content -Path $patchFile -Value $newContent -Encoding UTF8
-            Write-Host "  Removed patch entry from cordis.patch.yml" -ForegroundColor Green
+# ---------- discover targets ----------
+# Every profile directory that owns a cordis.patch.yml is a loader target.
+$targets = @()
+foreach ($dir in (Get-ChildItem $profilesDir -Directory -ErrorAction SilentlyContinue)) {
+    if ($dir.Name -like '*.bak-*') { continue }
+    if ($dir.Name -like 'lib-backup-*') { continue }
+    if ($dir.Name -like 'pf-lib-backup-*') { continue }
+    if ($dir.Name -eq 'node_modules') { continue }
+    $patch = Join-Path $dir.FullName 'cordis.patch.yml'
+    if (Test-Path $patch) {
+        $targets += [pscustomobject]@{
+            Profile = $dir.Name
+            Patch   = $patch
+            Modules = Join-Path $dir.FullName 'node_modules'
+            Link    = Join-Path (Join-Path $dir.FullName 'node_modules') $pkgName
         }
     }
+}
+# profiles\node_modules is shared by every profile package, so link it too.
+$sharedModules = Join-Path $profilesDir 'node_modules'
+$sharedLink    = Join-Path $sharedModules $pkgName
 
-    Write-Host "[Uninstall] Completed cleanly." -ForegroundColor Green
+if ($targets.Count -eq 0) { throw "no profile cordis.patch.yml found under $profilesDir" }
+
+Write-Host ("profiles : " + (($targets | ForEach-Object { $_.Profile }) -join ', ')) -ForegroundColor Cyan
+Write-Host ''
+
+$rowComment = '# Markdown strikethrough guard: escape lone tildes in ranges (6~8) so GFM singleTilde cannot strike them through'
+$rowBlock = @(
+    $rowComment,
+    '- insert:',
+    '    - id: markdown-strikethrough-guard',
+    "      name: '$pkgName'"
+)
+
+# ------------------ UNINSTALL ------------------
+if ($Uninstall) {
+    foreach ($link in (@($sharedLink) + @($targets | ForEach-Object { $_.Link }))) {
+        if (Test-Path $link) {
+            [System.IO.Directory]::Delete($link, $false)
+            Write-Host "  removed junction: $link" -ForegroundColor Yellow
+        }
+    }
+    foreach ($t in $targets) {
+        $content = Get-Content -Path $t.Patch -Raw -Encoding UTF8
+        $pattern = '(?ms)\r?\n# Markdown strikethrough guard[^\r\n]*\r?\n- insert:\r?\n\s+- id: markdown-strikethrough-guard\r?\n\s+name: ''[^'']*'''
+        $new = [System.Text.RegularExpressions.Regex]::Replace($content, $pattern, '')
+        if ($new -ne $content) {
+            Set-Content -Path $t.Patch -Value $new -Encoding UTF8
+            Write-Host "  removed loader row from $($t.Patch)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host '[Uninstall] done. Restart DSH to revert to stock behaviour.' -ForegroundColor Green
     return
 }
 
 # ------------------ INSTALL ------------------
-Write-Host "[Install] Installing dsh-markdown-strikethrough-guard..." -ForegroundColor Cyan
+$stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
 
-# 1. Ensure node_modules directories exist
-if (-not (Test-Path $profilesNodeModules)) {
-    New-Item -ItemType Directory -Path $profilesNodeModules -Force | Out-Null
-}
-
-# 2. Create Junction in profiles/node_modules
-if (Test-Path $targetProfiles) {
-    Write-Host "  Target junction already exists: $targetProfiles" -ForegroundColor Yellow
+if (-not (Test-Path $sharedModules)) { New-Item -ItemType Directory -Path $sharedModules -Force | Out-Null }
+if (-not (Test-Path $sharedLink)) {
+    New-Item -ItemType Junction -Path $sharedLink -Target $sourceDir | Out-Null
+    Write-Host "  + junction (shared): $sharedLink" -ForegroundColor Green
 } else {
-    Write-Host "  Creating junction: $targetProfiles -> $sourceDir"
-    New-Item -ItemType Junction -Path $targetProfiles -Target $sourceDir | Out-Null
+    Write-Host "  = junction exists  : $sharedLink" -ForegroundColor DarkGray
 }
 
-# 3. Create Junction in profiles/web/node_modules if present
-if (Test-Path $webNodeModules) {
-    if (-not (Test-Path $targetWeb)) {
-        Write-Host "  Creating junction: $targetWeb -> $sourceDir"
-        New-Item -ItemType Junction -Path $targetWeb -Target $sourceDir | Out-Null
-    }
-}
-
-# 4. Patch cordis.patch.yml
-if (Test-Path $patchFile) {
-    $content = Get-Content -Path $patchFile -Raw -Encoding UTF8
-    if ($content -match "markdown-strikethrough-guard") {
-        Write-Host "  cordis.patch.yml already has markdown-strikethrough-guard row." -ForegroundColor Yellow
+foreach ($t in $targets) {
+    Write-Host "[$($t.Profile)]" -ForegroundColor Cyan
+    if (-not (Test-Path $t.Modules)) { New-Item -ItemType Directory -Path $t.Modules -Force | Out-Null }
+    if (-not (Test-Path $t.Link)) {
+        New-Item -ItemType Junction -Path $t.Link -Target $sourceDir | Out-Null
+        Write-Host "  + junction: $($t.Link)" -ForegroundColor Green
     } else {
-        # Backup before modify
-        $timestamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
-        $bakFile = "$patchFile.bak-guard-$timestamp"
-        Copy-Item -Path $patchFile -Destination $bakFile
-        Write-Host "  Backed up cordis.patch.yml to $bakFile" -ForegroundColor Gray
-
-        $blockToAppend = "`r`n$rowComment`r`n" + ($rowEntry -join "`r`n") + "`r`n"
-        Add-Content -Path $patchFile -Value $blockToAppend -Encoding UTF8
-        Write-Host "  Appended loader row to $patchFile" -ForegroundColor Green
+        Write-Host "  = junction exists: $($t.Link)" -ForegroundColor DarkGray
     }
-} else {
-    Write-Warning "patchFile not found: $patchFile"
+
+    $content = Get-Content -Path $t.Patch -Raw -Encoding UTF8
+    if ($content -match 'markdown-strikethrough-guard') {
+        Write-Host "  = loader row already present" -ForegroundColor DarkGray
+    } else {
+        $bak = "$($t.Patch).bak-guard-$stamp"
+        Copy-Item -Path $t.Patch -Destination $bak
+        Write-Host "  ~ backup: $bak" -ForegroundColor DarkGray
+        $append = "`r`n" + ($rowBlock -join "`r`n") + "`r`n"
+        Add-Content -Path $t.Patch -Value $append -Encoding UTF8
+        Write-Host "  + loader row appended" -ForegroundColor Green
+    }
 }
 
-Write-Host "[Install] Success! Full restart of DSH is required for host loader row to take effect." -ForegroundColor Green
+Write-Host ''
+Write-Host '[Install] done.' -ForegroundColor Green
+Write-Host 'IMPORTANT: the host loads plugin rows at startup -- fully quit and restart DeepSeek Harness.' -ForegroundColor Yellow

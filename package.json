@@ -1,7 +1,7 @@
 {
   "name": "dsh-markdown-strikethrough-guard",
-  "description": "DSH client plugin: protects single-tilde ranges (e.g. 6~8, 160~180) from mis-triggering GFM strikethrough in chat views while preserving double-tilde (~~) strikethrough, code blocks, and math.",
-  "version": "0.1.0",
+  "description": "INEFFECTIVE (kept as a pitfall analysis): every DSH client module namespace is Object.freeze'd, so a plugin cannot replace MarkdownText. Documents why lone-tilde strikethrough cannot be fixed client-side.",
+  "version": "0.2.0",
   "publishConfig": {
     "access": "public"
   },
